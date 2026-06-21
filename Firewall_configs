@@ -1,21 +1,24 @@
 #!/bin/bash
 
 # =====================================================================
-# 1. KHAI BÁO BIẾN (Thay đổi giá trị 'i' và tên Interface theo máy bạn)
+# 1. KHAI BÁO BIẾN (BẮT BUỘC: Hãy sửa các thông số này cho đúng bài lab)
 # =====================================================================
-i=1 # Thay bằng số nhóm của bạn
+i=1  # Sửa số 1 thành số nhóm/mã số bài lab của bạn (ví dụ: i=2 nếu là mạng 192.168.120.0)
 
+# Điền chính xác tên cổng mạng của Router 1 (Dùng lệnh 'ip a' trên Router để xem)
+IF_LAN="eth1"  # Cổng nối vào vùng LAN (Corporate Network)
+IF_DMZ="eth2"  # Cổng nối vào vùng DMZ (Web Server)
+IF_WAN="eth0"  # Cổng nối vào Switch 2 (Hướng ra Internet)
+
+# Các dải mạng dựa theo biến i
 LAN_NET="192.168.1${i}0.0/24"
 DMZ_NET="192.168.${i}0.0/24"
 WEB_SERVER="192.168.${i}0.50"
 
-# Dùng lệnh 'ip a' trên Router 1 để điền chính xác tên cổng mạng:
-IF_LAN="eth1"  # Cổng nối vào LAN (Corporate Network)
-IF_DMZ="eth2"  # Cổng nối vào DMZ Network
-IF_WAN="eth0"  # Cổng nối vào Switch 2 (Hướng ra Internet)
+echo "=== ĐANG KHỞI TẠO CẤU HÌNH IPTABLES CHO ROUTER 1 ==="
 
 # =====================================================================
-# 2. RESET TOÀN BỘ BẢNG CŨ VỀ TRẠNG THÁI TRỐNG
+# 2. DỌN SẠCH CÁC LUẬT CŨ (RESET FIREWALL)
 # =====================================================================
 iptables -F
 iptables -X
@@ -23,71 +26,89 @@ iptables -t nat -F
 iptables -t nat -X
 
 # =====================================================================
-# 3. THIẾT LẬP CHÍNH SÁCH MẶC ĐỊNH (DEFAULT POLICIES) -> DROP HẾT
-# Đảm bảo: "The firewall MUST NOT accept any other traffic..."
+# 3. CHÍNH SÁCH MẶC ĐỊNH (DEFAULT POLICIES) -> DROP HẾT ĐỂ BẢO MẬT
 # =====================================================================
 iptables -P INPUT DROP
 iptables -P FORWARD DROP
 iptables -P OUTPUT DROP
 
 # =====================================================================
-# 4. QUẢN LÝ TRẠNG THÁI KẾT NỐI (STATEFUL FIREWALL)
-# Cho phép các gói tin thuộc kết nối ĐÃ THIẾT LẬP (ESTABLISHED, RELATED) đi qua
+# 4. QUẢN LÝ TRẠNG THÁI KẾT NỐI (STATEFUL INSPECTION)
+# Tự động cho phép các gói tin phản hồi (ESTABLISHED, RELATED) đi qua
 # =====================================================================
 iptables -A INPUT -m conntrack --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A FORWARD -m conntrack --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m conntrack --state ESTABLISHED,RELATED -j ACCEPT
 
 # =====================================================================
-# 5. THỰC THI CÁC CHÍNH SÁCH BẢO MẬT (RULES)
+# 5. CẤU HÌNH CHO BẢN THÂN FIREWALL (INPUT / OUTPUT)
 # =====================================================================
-
-# --- Yêu cầu: Firewall phải tự kết nối được với chính nó (Loopback) ---
+# - Tường lửa được phép giao tiếp với chính nó (giao diện Loopback)
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 
-# --- Yêu cầu DNS: LAN được phép gửi truy vấn DNS ra Internet ---
-iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p udp --dport 53 -m conntrack --state NEW -j ACCEPT
-iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 53 -m conntrack --state NEW -j ACCEPT
-
-# --- Yêu cầu SSH: ---
-# 1. LAN được phép SSH vào các máy trong DMZ
-iptables -A FORWARD -i $IF_LAN -o $IF_DMZ -s $LAN_NET -d $DMZ_NET -p tcp --dport 22 -m conntrack --state NEW -j ACCEPT
-# 2. LAN KHÔNG ĐƯỢC phép kết nối SSH ra Internet (Chặn tường minh)
-iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 22 -j DROP
-
-# --- Yêu cầu Web: Internet được kết nối HTTP (Port 80) vào Web Server trong DMZ ---
-# Cho phép Forward gói tin Port 80 từ ngoài vào Web Server
-iptables -A FORWARD -i $IF_WAN -o $IF_DMZ -d $WEB_SERVER -p tcp --dport 80 -m conntrack --state NEW -j ACCEPT
-# Cấu hình DNAT (Port Forwarding): Chuyển hướng lưu lượng HTTP đến IP của WAN vào máy Web Server
-iptables -t nat -A PREROUTING -i $IF_WAN -p tcp --dport 80 -j DNAT --to-destination $WEB_SERVER
-
-# --- Yêu cầu Tổng quát cho LAN: Được phép kết nối Internet/DMZ trừ các giao thức bị cấm ---
-# Cho phép duyệt Web (HTTP/HTTPS) từ LAN ra Internet
-iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 80 -m conntrack --state NEW -j ACCEPT
-iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 443 -m conntrack --state NEW -j ACCEPT
-
-# --- Yêu cầu Source NAT: Thực hiện NAT cho mạng LAN ra vùng ngoài ---
-iptables -t nat -A POSTROUTING -o $IF_WAN -s $LAN_NET -j MASQUERADE
-
-# --- Yêu cầu ICMP: Không cho phép ICMP không hợp lệ từ Internet vào LAN ---
-# Chặn các gói tin Ping (Echo Request) từ bên ngoài muốn thăm dò mạng LAN nội bộ
-iptables -A FORWARD -i $IF_WAN -o $IF_LAN -p icmp --icmp-type echo-request -j DROP
+# - Ngăn chặn mọi traffic khác chủ động kết nối trực tiếp đến bản thân Firewall
+# (Đã được đảm bảo bởi chính sách mặc định INPUT DROP ở trên)
 
 # =====================================================================
-# 6. BẢO VỆ CHỐNG TẤN CÔNG TỪ CHỐI DỊCH VỤ (DoS / Mitigations)
+# 6. CẤU HÌNH LUẬT CHUYỂN TIẾP (FORWARD CHAIN) CHO CÁC VÙNG MẠNG
 # =====================================================================
 
-# Loại bỏ ngay lập tức các gói tin có trạng thái không hợp lệ (INVALID)
+# --- CHỐNG TẤN CÔNG DOS / AN TOÀN MẠNG ---
+# Loại bỏ ngay lập tức các gói tin có trạng thái không hợp lệ (Chống Ping of Death phân mảnh)
 iptables -A FORWARD -m conntrack --state INVALID -j DROP
 
-# Chống tấn công SYN-Flood: Giới hạn số lượng gói SYN TCP mới tạo kết nối
+# Giới hạn tốc độ gói SYN để chống tấn công SYN-Flood
 iptables -N SYN_FLOOD
 iptables -A FORWARD -p tcp --syn -j SYN_FLOOD
 iptables -A SYN_FLOOD -m limit --limit 1/s --limit-burst 3 -j RETURN
 iptables -A SYN_FLOOD -j DROP
 
-# Chống tấn công Ping of Death: Giới hạn tần suất nhận gói ICMP Echo Request trung chuyển
+
+# --- DỊCH VỤ DNS ---
+# Cho phép vùng LAN gửi truy vấn DNS ra các DNS Server bên ngoài Internet
+iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p udp --dport 53 -m conntrack --state NEW -j ACCEPT
+iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 53 -m conntrack --state NEW -j ACCEPT
+
+
+# --- DỊCH VỤ SSH ---
+# 1. Cho phép vùng LAN kết nối SSH tới các máy trong vùng DMZ
+iptables -A FORWARD -i $IF_LAN -o $IF_DMZ -s $LAN_NET -d $DMZ_NET -p tcp --dport 22 -m conntrack --state NEW -j ACCEPT
+
+# 2. CẤM TUYỆT ĐỐI vùng LAN khởi tạo kết nối SSH ra ngoài Internet
+iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 22 -j DROP
+
+
+# --- DỊCH VỤ WEB (HTTP/HTTPS) ---
+# 1. Cho phép Internet truy cập vào Web Server trong vùng DMZ bằng cổng 80 (HTTP)
+iptables -A FORWARD -i $IF_WAN -o $IF_DMZ -d $WEB_SERVER -p tcp --dport 80 -m conntrack --state NEW -j ACCEPT
+
+# 2. Cho phép LAN khởi tạo kết nối Web (HTTP/HTTPS) ra Internet và DMZ
+iptables -A FORWARD -i $IF_LAN -s $LAN_NET -p tcp --dport 80 -m conntrack --state NEW -j ACCEPT
+iptables -A FORWARD -i $IF_LAN -s $LAN_NET -p tcp --dport 443 -m conntrack --state NEW -j ACCEPT
+
+
+# --- QUẢN LÝ GIAO THỨC ICMP (PING & MẠNG) ---
+# Cho phép các loại ICMP hợp lệ và cần thiết cho hệ thống vận hành
+iptables -A FORWARD -p icmp --icmp-type destination-unreachable -j ACCEPT
+iptables -A FORWARD -p icmp --icmp-type time-exceeded -j ACCEPT
+iptables -A FORWARD -p icmp --icmp-type echo-reply -j ACCEPT
+
+# Giới hạn băng thông Ping để chống DoS Ping Flood
 iptables -A FORWARD -p icmp --icmp-type echo-request -m limit --limit 1/s --limit-burst 4 -j ACCEPT
 
-echo "Cấu hình iptables hoàn tất thành công!"
+# CHẶN các gói tin Ping (Echo Request) không phù hợp từ Internet chủ động thăm dò mạng LAN
+iptables -A FORWARD -i $IF_WAN -o $IF_LAN -p icmp --icmp-type echo-request -j DROP
+
+
+# =====================================================================
+# 7. CẤU HÌNH ĐỊNH TUYẾN NAT (BẢNG NAT)
+# =====================================================================
+# - Source NAT (Ẩn IP nguồn): Định danh các máy LAN thành IP mặt ngoài khi ra Internet
+iptables -t nat -A POSTROUTING -o $IF_WAN -s $LAN_NET -j MASQUERADE
+
+# - Destination NAT (Port Forwarding): Chuyển hướng traffic HTTP từ ngoài vào đúng Web Server DMZ
+iptables -t nat -A PREROUTING -i $IF_WAN -p tcp --dport 80 -j DNAT --to-destination $WEB_SERVER
+
+# =====================================================================
+echo "=== ĐÃ CẤU HÌNH IPTABLES THÀNH CÔNG CHO ROUTER 1 ==="
