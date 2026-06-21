@@ -88,10 +88,11 @@ iptables -A FORWARD -p icmp --icmp-type destination-unreachable -j ACCEPT
 iptables -A FORWARD -p icmp --icmp-type time-exceeded -j ACCEPT
 iptables -A FORWARD -p icmp --icmp-type echo-reply -j ACCEPT
 
-# Rate-limit ICMP Echo Requests to mitigate Ping Flood DoS attacks
-iptables -A FORWARD -p icmp --icmp-type echo-request -m limit --limit 1/s --limit-burst 4 -j ACCEPT
+# Only allow LAN (-i $IF_LAN) actively send packet Ping (Echo Request) to networks 
+iptables -A FORWARD -i $IF_LAN -p icmp --icmp-type echo-request -m limit --limit 1/s --limit-burst 4 -j ACCEPT
 
-# DROP inappropriate ICMP Echo Requests from the Internet targeting the internal LAN
+# 3. Ban DMZ and Internet to send ping to LAN
+iptables -A FORWARD -i $IF_DMZ -o $IF_LAN -p icmp --icmp-type echo-request -j DROP
 iptables -A FORWARD -i $IF_WAN -o $IF_LAN -p icmp --icmp-type echo-request -j DROP
 
 
