@@ -1,24 +1,18 @@
 #!/bin/bash
 
-# =====================================================================
-# 1. KHAI BÁO BIẾN (BẮT BUỘC: Hãy sửa các thông số này cho đúng bài lab)
-# =====================================================================
-i=1  # Sửa số 1 thành số nhóm/mã số bài lab của bạn (ví dụ: i=2 nếu là mạng 192.168.120.0)
+IF_LAN="eth1"  # Interface connected to the LAN (Corporate Network)
+IF_DMZ="eth2"  # Interface connected to the DMZ (Web Server)
+IF_WAN="eth0"  # Interface connected to Switch 2 (Facing the Internet)
 
-# Điền chính xác tên cổng mạng của Router 1 (Dùng lệnh 'ip a' trên Router để xem)
-IF_LAN="eth1"  # Cổng nối vào vùng LAN (Corporate Network)
-IF_DMZ="eth2"  # Cổng nối vào vùng DMZ (Web Server)
-IF_WAN="eth0"  # Cổng nối vào Switch 2 (Hướng ra Internet)
 
-# Các dải mạng dựa theo biến i
-LAN_NET="192.168.1${i}0.0/24"
-DMZ_NET="192.168.${i}0.0/24"
-WEB_SERVER="192.168.${i}0.50"
+LAN_NET="192.168.120.0/24"
+DMZ_NET="192.168.20.0/24"
+WEB_SERVER="192.168.20.50"
 
-echo "=== ĐANG KHỞI TẠO CẤU HÌNH IPTABLES CHO ROUTER 1 ==="
+echo "=== INITIALIZING IPTABLES CONFIGURATION FOR ROUTER 1 ==="
 
 # =====================================================================
-# 2. DỌN SẠCH CÁC LUẬT CŨ (RESET FIREWALL)
+# 2. FLUSH AND RESET SYSTEM RULES (RESET FIREWALL)
 # =====================================================================
 iptables -F
 iptables -X
@@ -26,89 +20,89 @@ iptables -t nat -F
 iptables -t nat -X
 
 # =====================================================================
-# 3. CHÍNH SÁCH MẶC ĐỊNH (DEFAULT POLICIES) -> DROP HẾT ĐỂ BẢO MẬT
+# 3. DEFAULT POLICIES -> DROP ALL FOR MAXIMUM SECURITY
 # =====================================================================
 iptables -P INPUT DROP
 iptables -P FORWARD DROP
 iptables -P OUTPUT DROP
 
 # =====================================================================
-# 4. QUẢN LÝ TRẠNG THÁI KẾT NỐI (STATEFUL INSPECTION)
-# Tự động cho phép các gói tin phản hồi (ESTABLISHED, RELATED) đi qua
+# 4. CONNECTION STATE MANAGEMENT (STATEFUL INSPECTION)
+# Automatically allow response packets (ESTABLISHED, RELATED) to pass through
 # =====================================================================
 iptables -A INPUT -m conntrack --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A FORWARD -m conntrack --state ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT -m conntrack --state ESTABLISHED,RELATED -j ACCEPT
 
 # =====================================================================
-# 5. CẤU HÌNH CHO BẢN THÂN FIREWALL (INPUT / OUTPUT)
+# 5. FIREWALL SELF-TRAFFIC CONFIGURATION (INPUT / OUTPUT)
 # =====================================================================
-# - Tường lửa được phép giao tiếp với chính nó (giao diện Loopback)
+# - Allow the firewall to communicate with itself via the Loopback interface
 iptables -A INPUT -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 
-# - Ngăn chặn mọi traffic khác chủ động kết nối trực tiếp đến bản thân Firewall
-# (Đã được đảm bảo bởi chính sách mặc định INPUT DROP ở trên)
+# - Block all other traffic attempting to initiate a direct connection to the Firewall
+# (Explicitly handled by the default INPUT DROP policy above)
 
 # =====================================================================
-# 6. CẤU HÌNH LUẬT CHUYỂN TIẾP (FORWARD CHAIN) CHO CÁC VÙNG MẠNG
+# 6. FORWARD CHAIN CONFIGURATION FOR NETWORK ZONES
 # =====================================================================
 
-# --- CHỐNG TẤN CÔNG DOS / AN TOÀN MẠNG ---
-# Loại bỏ ngay lập tức các gói tin có trạng thái không hợp lệ (Chống Ping of Death phân mảnh)
+# --- DOS ATTACK MITIGATION / NETWORK SECURITY ---
+# Drop any invalid packets immediately (Protects against fragmented Ping of Death)
 iptables -A FORWARD -m conntrack --state INVALID -j DROP
 
-# Giới hạn tốc độ gói SYN để chống tấn công SYN-Flood
+# Rate-limit incoming TCP SYN packets to mitigate SYN-Flood attacks
 iptables -N SYN_FLOOD
 iptables -A FORWARD -p tcp --syn -j SYN_FLOOD
 iptables -A SYN_FLOOD -m limit --limit 1/s --limit-burst 3 -j RETURN
 iptables -A SYN_FLOOD -j DROP
 
 
-# --- DỊCH VỤ DNS ---
-# Cho phép vùng LAN gửi truy vấn DNS ra các DNS Server bên ngoài Internet
+# --- DNS SERVICES ---
+# Allow LAN hosts to send DNS queries to external DNS servers on the Internet
 iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p udp --dport 53 -m conntrack --state NEW -j ACCEPT
 iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 53 -m conntrack --state NEW -j ACCEPT
 
 
-# --- DỊCH VỤ SSH ---
-# 1. Cho phép vùng LAN kết nối SSH tới các máy trong vùng DMZ
+# --- SSH SERVICES ---
+# 1. Allow LAN hosts to establish SSH connections to hosts inside the DMZ
 iptables -A FORWARD -i $IF_LAN -o $IF_DMZ -s $LAN_NET -d $DMZ_NET -p tcp --dport 22 -m conntrack --state NEW -j ACCEPT
 
-# 2. CẤM TUYỆT ĐỐI vùng LAN khởi tạo kết nối SSH ra ngoài Internet
+# 2. STRICTLY PROHIBIT LAN hosts from initiating SSH connections to the Internet
 iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 22 -j DROP
 
 
-# --- DỊCH VỤ WEB (HTTP/HTTPS) ---
-# 1. Cho phép Internet truy cập vào Web Server trong vùng DMZ bằng cổng 80 (HTTP)
+# --- WEB SERVICES (HTTP/HTTPS) ---
+# 1. Allow Internet hosts to connect using HTTP (Port 80) to the Web Server running in the DMZ
 iptables -A FORWARD -i $IF_WAN -o $IF_DMZ -d $WEB_SERVER -p tcp --dport 80 -m conntrack --state NEW -j ACCEPT
 
-# 2. Cho phép LAN khởi tạo kết nối Web (HTTP/HTTPS) ra Internet và DMZ
+# 2. Allow LAN hosts to initiate Web connections (HTTP/HTTPS) to the Internet and DMZ
 iptables -A FORWARD -i $IF_LAN -s $LAN_NET -p tcp --dport 80 -m conntrack --state NEW -j ACCEPT
 iptables -A FORWARD -i $IF_LAN -s $LAN_NET -p tcp --dport 443 -m conntrack --state NEW -j ACCEPT
 
 
-# --- QUẢN LÝ GIAO THỨC ICMP (PING & MẠNG) ---
-# Cho phép các loại ICMP hợp lệ và cần thiết cho hệ thống vận hành
+# --- ICMP PROTOCOL MANAGEMENT (PING & NETWORK DIAGNOSTICS) ---
+# Allow essential ICMP types required for proper network operations and PMTUD
 iptables -A FORWARD -p icmp --icmp-type destination-unreachable -j ACCEPT
 iptables -A FORWARD -p icmp --icmp-type time-exceeded -j ACCEPT
 iptables -A FORWARD -p icmp --icmp-type echo-reply -j ACCEPT
 
-# Giới hạn băng thông Ping để chống DoS Ping Flood
+# Rate-limit ICMP Echo Requests to mitigate Ping Flood DoS attacks
 iptables -A FORWARD -p icmp --icmp-type echo-request -m limit --limit 1/s --limit-burst 4 -j ACCEPT
 
-# CHẶN các gói tin Ping (Echo Request) không phù hợp từ Internet chủ động thăm dò mạng LAN
+# DROP inappropriate ICMP Echo Requests from the Internet targeting the internal LAN
 iptables -A FORWARD -i $IF_WAN -o $IF_LAN -p icmp --icmp-type echo-request -j DROP
 
 
 # =====================================================================
-# 7. CẤU HÌNH ĐỊNH TUYẾN NAT (BẢNG NAT)
+# 7. NAT ROUTING CONFIGURATION (NAT TABLE)
 # =====================================================================
-# - Source NAT (Ẩn IP nguồn): Định danh các máy LAN thành IP mặt ngoài khi ra Internet
+# - Source NAT (MASQUERADE): Translate internal LAN IPs to the WAN IP when accessing the Internet
 iptables -t nat -A POSTROUTING -o $IF_WAN -s $LAN_NET -j MASQUERADE
 
-# - Destination NAT (Port Forwarding): Chuyển hướng traffic HTTP từ ngoài vào đúng Web Server DMZ
+# - Destination NAT (Port Forwarding): Forward external HTTP traffic from WAN port 80 to the Web Server in the DMZ
 iptables -t nat -A PREROUTING -i $IF_WAN -p tcp --dport 80 -j DNAT --to-destination $WEB_SERVER
 
 # =====================================================================
-echo "=== ĐÃ CẤU HÌNH IPTABLES THÀNH CÔNG CHO ROUTER 1 ==="
+echo "=== IPTABLES CONFIGURATION SUCCESSFULLY APPLIED FOR ROUTER 1 ==="
