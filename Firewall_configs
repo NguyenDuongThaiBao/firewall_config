@@ -88,12 +88,16 @@ iptables -A FORWARD -p icmp --icmp-type destination-unreachable -j ACCEPT
 iptables -A FORWARD -p icmp --icmp-type time-exceeded -j ACCEPT
 iptables -A FORWARD -p icmp --icmp-type echo-reply -j ACCEPT
 
-# Only allow LAN (-i $IF_LAN) actively send packet Ping (Echo Request) to networks 
-iptables -A FORWARD -i $IF_LAN -p icmp --icmp-type echo-request -m limit --limit 1/s --limit-burst 4 -j ACCEPT
+# Allow LAN hosts to send ICMP Echo Requests (Ping) out to any destination safely
+iptables -A FORWARD -i $IF_LAN -p icmp --icmp-type echo-request -m limit --limit 2/s --limit-burst 5 -j ACCEPT
 
 # 3. Ban DMZ and Internet to send ping to LAN
 iptables -A FORWARD -i $IF_DMZ -o $IF_LAN -p icmp --icmp-type echo-request -j DROP
 iptables -A FORWARD -i $IF_WAN -o $IF_LAN -p icmp --icmp-type echo-request -j DROP
+
+# --- WAN (INTERNET) TRAFFIC POLICY ---
+# Allow external hosts to connect using HTTP (Port 80) to the Web Server inside DMZ
+iptables -A FORWARD -i $IF_WAN -o $IF_DMZ -d $WEB_SERVER -p tcp --dport 80 -m conntrack --ctstate NEW -j ACCEPT
 
 
 # =====================================================================
