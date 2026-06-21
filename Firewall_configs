@@ -1,0 +1,93 @@
+#!/bin/bash
+
+# =====================================================================
+# 1. KHAI BÁO BIẾN (Thay đổi giá trị 'i' và tên Interface theo máy bạn)
+# =====================================================================
+i=1 # Thay bằng số nhóm của bạn
+
+LAN_NET="192.168.1${i}0.0/24"
+DMZ_NET="192.168.${i}0.0/24"
+WEB_SERVER="192.168.${i}0.50"
+
+# Dùng lệnh 'ip a' trên Router 1 để điền chính xác tên cổng mạng:
+IF_LAN="eth1"  # Cổng nối vào LAN (Corporate Network)
+IF_DMZ="eth2"  # Cổng nối vào DMZ Network
+IF_WAN="eth0"  # Cổng nối vào Switch 2 (Hướng ra Internet)
+
+# =====================================================================
+# 2. RESET TOÀN BỘ BẢNG CŨ VỀ TRẠNG THÁI TRỐNG
+# =====================================================================
+iptables -F
+iptables -X
+iptables -t nat -F
+iptables -t nat -X
+
+# =====================================================================
+# 3. THIẾT LẬP CHÍNH SÁCH MẶC ĐỊNH (DEFAULT POLICIES) -> DROP HẾT
+# Đảm bảo: "The firewall MUST NOT accept any other traffic..."
+# =====================================================================
+iptables -P INPUT DROP
+iptables -P FORWARD DROP
+iptables -P OUTPUT DROP
+
+# =====================================================================
+# 4. QUẢN LÝ TRẠNG THÁI KẾT NỐI (STATEFUL FIREWALL)
+# Cho phép các gói tin thuộc kết nối ĐÃ THIẾT LẬP (ESTABLISHED, RELATED) đi qua
+# =====================================================================
+iptables -A INPUT -m conntrack --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A FORWARD -m conntrack --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m conntrack --state ESTABLISHED,RELATED -j ACCEPT
+
+# =====================================================================
+# 5. THỰC THI CÁC CHÍNH SÁCH BẢO MẬT (RULES)
+# =====================================================================
+
+# --- Yêu cầu: Firewall phải tự kết nối được với chính nó (Loopback) ---
+iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# --- Yêu cầu DNS: LAN được phép gửi truy vấn DNS ra Internet ---
+iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p udp --dport 53 -m conntrack --state NEW -j ACCEPT
+iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 53 -m conntrack --state NEW -j ACCEPT
+
+# --- Yêu cầu SSH: ---
+# 1. LAN được phép SSH vào các máy trong DMZ
+iptables -A FORWARD -i $IF_LAN -o $IF_DMZ -s $LAN_NET -d $DMZ_NET -p tcp --dport 22 -m conntrack --state NEW -j ACCEPT
+# 2. LAN KHÔNG ĐƯỢC phép kết nối SSH ra Internet (Chặn tường minh)
+iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 22 -j DROP
+
+# --- Yêu cầu Web: Internet được kết nối HTTP (Port 80) vào Web Server trong DMZ ---
+# Cho phép Forward gói tin Port 80 từ ngoài vào Web Server
+iptables -A FORWARD -i $IF_WAN -o $IF_DMZ -d $WEB_SERVER -p tcp --dport 80 -m conntrack --state NEW -j ACCEPT
+# Cấu hình DNAT (Port Forwarding): Chuyển hướng lưu lượng HTTP đến IP của WAN vào máy Web Server
+iptables -t nat -A PREROUTING -i $IF_WAN -p tcp --dport 80 -j DNAT --to-destination $WEB_SERVER
+
+# --- Yêu cầu Tổng quát cho LAN: Được phép kết nối Internet/DMZ trừ các giao thức bị cấm ---
+# Cho phép duyệt Web (HTTP/HTTPS) từ LAN ra Internet
+iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 80 -m conntrack --state NEW -j ACCEPT
+iptables -A FORWARD -i $IF_LAN -o $IF_WAN -s $LAN_NET -p tcp --dport 443 -m conntrack --state NEW -j ACCEPT
+
+# --- Yêu cầu Source NAT: Thực hiện NAT cho mạng LAN ra vùng ngoài ---
+iptables -t nat -A POSTROUTING -o $IF_WAN -s $LAN_NET -j MASQUERADE
+
+# --- Yêu cầu ICMP: Không cho phép ICMP không hợp lệ từ Internet vào LAN ---
+# Chặn các gói tin Ping (Echo Request) từ bên ngoài muốn thăm dò mạng LAN nội bộ
+iptables -A FORWARD -i $IF_WAN -o $IF_LAN -p icmp --icmp-type echo-request -j DROP
+
+# =====================================================================
+# 6. BẢO VỆ CHỐNG TẤN CÔNG TỪ CHỐI DỊCH VỤ (DoS / Mitigations)
+# =====================================================================
+
+# Loại bỏ ngay lập tức các gói tin có trạng thái không hợp lệ (INVALID)
+iptables -A FORWARD -m conntrack --state INVALID -j DROP
+
+# Chống tấn công SYN-Flood: Giới hạn số lượng gói SYN TCP mới tạo kết nối
+iptables -N SYN_FLOOD
+iptables -A FORWARD -p tcp --syn -j SYN_FLOOD
+iptables -A SYN_FLOOD -m limit --limit 1/s --limit-burst 3 -j RETURN
+iptables -A SYN_FLOOD -j DROP
+
+# Chống tấn công Ping of Death: Giới hạn tần suất nhận gói ICMP Echo Request trung chuyển
+iptables -A FORWARD -p icmp --icmp-type echo-request -m limit --limit 1/s --limit-burst 4 -j ACCEPT
+
+echo "Cấu hình iptables hoàn tất thành công!"
