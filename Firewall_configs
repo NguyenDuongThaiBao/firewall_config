@@ -52,8 +52,15 @@ iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP
 # =====================================================================
 # 6. FIREWALL INPUT — SSH from LAN into Router 1 itself
 # =====================================================================
-iptables -A INPUT -i $IF_LAN -p tcp --dport 22 \
-         -m conntrack --ctstate NEW -j ACCEPT
+# 1. Allow host 1 to ssh router
+iptables -A INPUT -i $IF_LAN -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
+
+# 2. Ban host 2 and host 3 ping router
+iptables -A INPUT -i $IF_WAN -p icmp --icmp-type echo-request -j DROP
+iptables -A INPUT -i $IF_DMZ -p icmp --icmp-type echo-request -j DROP
+
+# 3. allow host 1 to ping router
+iptables -A INPUT -i $IF_LAN -p icmp --icmp-type echo-request -j ACCEPT
 
 # =====================================================================
 # 7. DOS PROTECTION
@@ -70,7 +77,6 @@ iptables -A INPUT -p tcp --syn \
          -m limit --limit 1/s --limit-burst 3 -j ACCEPT
 
 # Ping of Death — rate limit ALL ICMP globally
-iptables -A FORWARD -p icmp -m limit --limit 5/s --limit-burst 10 -j ACCEPT
 iptables -A INPUT   -p icmp -m limit --limit 5/s --limit-burst 10 -j ACCEPT
 
 # =====================================================================
@@ -79,24 +85,16 @@ iptables -A INPUT   -p icmp -m limit --limit 5/s --limit-burst 10 -j ACCEPT
 #      NOT back to internet — this was causing Host 3 to ping Host 1
 # =====================================================================
 
-# Allow essential ICMP error messages — needed for network to work
+# BAN WAN/DMZ into LAN
+iptables -A FORWARD -i $IF_WAN -o $IF_LAN -p icmp --icmp-type echo-request -j DROP
+iptables -A FORWARD -i $IF_DMZ -o $IF_LAN -p icmp --icmp-type echo-request -j DROP
+
+# B. Allow error message
 iptables -A FORWARD -p icmp --icmp-type destination-unreachable -j ACCEPT
 iptables -A FORWARD -p icmp --icmp-type time-exceeded           -j ACCEPT
 
-# FIX: echo-reply only goes back TO LAN or DMZ, never back to internet
-iptables -A FORWARD -o $IF_LAN -p icmp --icmp-type echo-reply   -j ACCEPT
-iptables -A FORWARD -o $IF_DMZ -p icmp --icmp-type echo-reply   -j ACCEPT
-
-# LAN can ping freely outbound
-iptables -A FORWARD -i $IF_LAN -p icmp --icmp-type echo-request -j ACCEPT
-
-# Block internet pinging LAN
-iptables -A FORWARD -i $IF_WAN -o $IF_LAN \
-         -p icmp --icmp-type echo-request -j DROP
-
-# Block DMZ pinging LAN
-iptables -A FORWARD -i $IF_DMZ -o $IF_LAN \
-         -p icmp --icmp-type echo-request -j DROP
+# C. Only allow LAN to go out Internet
+iptables -A FORWARD -i $IF_LAN -p icmp --icmp-type echo-request -m limit --limit 5/s --limit-burst 10 -j ACCEPT
 
 # =====================================================================
 # 9. LAN TRAFFIC RULES
