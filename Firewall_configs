@@ -73,7 +73,7 @@ iptables -A SYN_FLOOD -m limit --limit 1/s --limit-burst 3 -j RETURN
 iptables -A SYN_FLOOD -j DROP
 
 # Protect Router 1 itself from SYN flood
-iptables -A INPUT -p tcp --syn \
+iptables -A INPUT -i $IF_LAN -p tcp --syn \
          -m limit --limit 1/s --limit-burst 3 -j ACCEPT
 
 # Ping of Death — rate limit ALL ICMP globally
