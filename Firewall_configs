@@ -16,13 +16,12 @@ WEB_SERVER="192.168.${i}0.50"
 echo "=== INITIALIZING FIREWALL FOR ROUTER 1 (GROUP $i) ==="
 
 # =====================================================================
-# 2. FLUSH AND RESET — wipe everything before starting fresh
+# 2. FLUSH AND RESET
 # =====================================================================
 iptables -F
 iptables -X
 iptables -t nat -F
 iptables -t nat -X
-# Also flush mangle table in case of leftover rules
 iptables -t mangle -F
 iptables -t mangle -X
 
@@ -34,115 +33,96 @@ iptables -P FORWARD DROP
 iptables -P OUTPUT  DROP
 
 # =====================================================================
-# 4. LOOPBACK — firewall communicates with itself
-# Exercise: "The firewall MUST be able to communicate with itself"
+# 4. LOOPBACK — router talks to itself
 # =====================================================================
 iptables -A INPUT  -i lo -j ACCEPT
 iptables -A OUTPUT -o lo -j ACCEPT
 
 # =====================================================================
 # 5. STATEFUL INSPECTION — allow replies to established connections
-# Without this, outgoing requests work but replies get blocked
 # =====================================================================
 iptables -A INPUT   -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A OUTPUT  -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 iptables -A FORWARD -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
 
-# Drop invalid/broken packets immediately
+# Drop broken/invalid packets immediately
 iptables -A INPUT   -m conntrack --ctstate INVALID -j DROP
 iptables -A FORWARD -m conntrack --ctstate INVALID -j DROP
 
 # =====================================================================
-# 6. FIREWALL INPUT RULES (traffic destined FOR Router 1 itself)
+# 6. FIREWALL INPUT — SSH from LAN into Router 1 itself
 # =====================================================================
-
-# Exercise: "The firewall MUST accept SSH connections from the LAN
-# towards the DMZ" — this means LAN can SSH into Router 1 for management
 iptables -A INPUT -i $IF_LAN -p tcp --dport 22 \
          -m conntrack --ctstate NEW -j ACCEPT
 
-# Exercise: "The firewall MUST NOT accept any other traffic
-# from the LAN, DMZ, or Internet"
-# Satisfied by default INPUT DROP policy above — nothing else gets in
-
 # =====================================================================
 # 7. DOS PROTECTION
-# Exercise: "Protect networks against SYN-Flood, Ping of Death, DoS"
 # =====================================================================
 
-# --- SYN Flood protection ---
-# Creates a separate chain to rate limit new TCP connection requests
-# Allows 1 new connection/sec with burst of 3
-# Anything above that gets dropped silently
+# SYN Flood — rate limit new TCP connections
 iptables -N SYN_FLOOD
 iptables -A FORWARD -p tcp --syn -j SYN_FLOOD
 iptables -A SYN_FLOOD -m limit --limit 1/s --limit-burst 3 -j RETURN
 iptables -A SYN_FLOOD -j DROP
 
-# Also protect Router 1 itself from SYN flood
-iptables -A INPUT -p tcp --syn -m limit --limit 1/s --limit-burst 3 -j ACCEPT
+# Protect Router 1 itself from SYN flood
+iptables -A INPUT -p tcp --syn \
+         -m limit --limit 1/s --limit-burst 3 -j ACCEPT
 
-# --- Ping of Death protection ---
-# Rate limit ICMP packets — oversized/flood pings get dropped
+# Ping of Death — rate limit ALL ICMP globally
 iptables -A FORWARD -p icmp -m limit --limit 5/s --limit-burst 10 -j ACCEPT
 iptables -A INPUT   -p icmp -m limit --limit 5/s --limit-burst 10 -j ACCEPT
 
 # =====================================================================
 # 8. ICMP MANAGEMENT
-# Exercise: "Inappropriate ICMP types MUST NOT be permitted
-# from the Internet to the LAN"
+# FIX: echo-reply only allowed going INTO LAN or DMZ
+#      NOT back to internet — this was causing Host 3 to ping Host 1
 # =====================================================================
 
-# Allow essential ICMP types needed for network to function properly
-# These should never be blocked — they carry important error messages
+# Allow essential ICMP error messages — needed for network to work
 iptables -A FORWARD -p icmp --icmp-type destination-unreachable -j ACCEPT
 iptables -A FORWARD -p icmp --icmp-type time-exceeded           -j ACCEPT
-iptables -A FORWARD -p icmp --icmp-type echo-reply              -j ACCEPT
 
-# Allow LAN to ping freely (no rate limit — LAN is trusted)
+# FIX: echo-reply only goes back TO LAN or DMZ, never back to internet
+iptables -A FORWARD -o $IF_LAN -p icmp --icmp-type echo-reply   -j ACCEPT
+iptables -A FORWARD -o $IF_DMZ -p icmp --icmp-type echo-reply   -j ACCEPT
+
+# LAN can ping freely outbound
 iptables -A FORWARD -i $IF_LAN -p icmp --icmp-type echo-request -j ACCEPT
 
-# Block ping FROM internet TO LAN (inappropriate ICMP from internet)
+# Block internet pinging LAN
 iptables -A FORWARD -i $IF_WAN -o $IF_LAN \
          -p icmp --icmp-type echo-request -j DROP
 
-# Block ping FROM DMZ TO LAN
+# Block DMZ pinging LAN
 iptables -A FORWARD -i $IF_DMZ -o $IF_LAN \
          -p icmp --icmp-type echo-request -j DROP
 
 # =====================================================================
 # 9. LAN TRAFFIC RULES
-# Exercise: "Hosts on LAN MAY initiate connections to Internet and DMZ"
 # =====================================================================
 
-# --- EXPLICIT BLOCK: LAN cannot SSH to internet ---
-# Exercise: "Hosts on LAN MUST NOT initiate SSH to Internet"
+# Block SSH from LAN to internet
 iptables -A FORWARD -i $IF_LAN -o $IF_WAN \
          -p tcp --dport 22 -j DROP
 
-# --- EXPLICIT ALLOW: LAN can SSH into DMZ ---
-# Exercise: "Hosts on LAN MUST be able to establish SSH to DMZ"
+# Allow SSH from LAN to DMZ
 iptables -A FORWARD -i $IF_LAN -o $IF_DMZ \
          -p tcp --dport 22 -m conntrack --ctstate NEW -j ACCEPT
 
-# --- EXPLICIT ALLOW: LAN can send DNS queries to internet ---
-# Exercise: "Hosts on LAN MUST be able to send DNS queries
-# to external DNS servers and receive responses"
+# Allow DNS from LAN to internet
 iptables -A FORWARD -i $IF_LAN -o $IF_WAN \
          -p udp --dport 53 -j ACCEPT
 iptables -A FORWARD -i $IF_LAN -o $IF_WAN \
          -p tcp --dport 53 -j ACCEPT
 
-# --- GENERAL ALLOW: LAN can initiate anything else outbound ---
-# Covers HTTP, HTTPS, and any other outbound traffic from LAN
-# SSH to internet already blocked above, DNS already allowed above
+# Allow all other outbound traffic from LAN (HTTP, HTTPS, etc.)
 iptables -A FORWARD -i $IF_LAN \
          -m conntrack --ctstate NEW -j ACCEPT
 
 # =====================================================================
-# 10. INTERNET → DMZ RULES
-# Exercise: "Hosts on Internet MUST be able to connect using
-# HTTP to the web server in DMZ"
+# 10. INTERNET → DMZ
+# Only HTTP port 80 allowed from internet to web server
 # =====================================================================
 iptables -A FORWARD -i $IF_WAN -o $IF_DMZ \
          -d $WEB_SERVER -p tcp --dport 80 \
@@ -150,28 +130,24 @@ iptables -A FORWARD -i $IF_WAN -o $IF_DMZ \
 
 # =====================================================================
 # 11. DMZ ISOLATION
-# Exercise: "Hosts on DMZ MUST NOT initiate connections to LAN or Internet"
-# Fully handled by default FORWARD DROP policy
-# DMZ has no NEW outbound rules so it cannot initiate anything
+# No outbound rules for DMZ = cannot initiate anything
+# Handled automatically by default FORWARD DROP policy
 # =====================================================================
 
 # =====================================================================
-# 12. NAT CONFIGURATION
+# 12. NAT
 # =====================================================================
 
-# SNAT — hide LAN private IPs behind Router 1's public IP
-# Exercise: "Firewall must implement source NAT for LAN hosts"
+# SNAT — hide LAN IPs behind Router 1's public IP
 iptables -t nat -A POSTROUTING -o $IF_WAN \
          -s $LAN_NET -j MASQUERADE
 
-# DNAT — redirect HTTP from internet hitting Router 1 → forward to Host 2
-# When Host 3 visits Router 1's IP on port 80, secretly send to web server
+# DNAT — redirect HTTP from internet to web server
 iptables -t nat -A PREROUTING -i $IF_WAN \
          -p tcp --dport 80 -j DNAT --to-destination $WEB_SERVER
 
 # =====================================================================
-# 13. IP FORWARDING — master switch for routing between interfaces
-# Without this Router 1 won't move packets between its 3 cables
+# 13. IP FORWARDING — master switch for routing
 # =====================================================================
 echo 1 > /proc/sys/net/ipv4/ip_forward
 
@@ -179,6 +155,5 @@ echo ""
 echo "=== FIREWALL RULES APPLIED SUCCESSFULLY ==="
 echo ""
 echo "Verify with:"
-echo "  sudo iptables -L -v -n        (all rules)"
-echo "  sudo iptables -L FORWARD -v -n (forward chain only)"
-echo "  sudo iptables -t nat -L -v -n  (NAT rules)"
+echo "  sudo iptables -L FORWARD -v -n"
+echo "  sudo iptables -t nat -L -v -n"
